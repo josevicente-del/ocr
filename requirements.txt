@@ -1,0 +1,9 @@
+fastapi
+pydantic
+openpyxl
+PyMuPDF
+pytesseract
+httpx
+uvicorn
+pillow
+python-multipart
