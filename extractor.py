@@ -14,9 +14,19 @@ import httpx
 from PIL import Image
 import pytesseract
 
-# Configuración de Tesseract local
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-tessdata_dir = "d:/Antigravity/oc3/tessdata"
+# Configuración de Tesseract local (compatible con Windows y Linux)
+tesseract_path = os.environ.get("TESSERACT_CMD")
+if not tesseract_path:
+    tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe" if os.name == 'nt' else "/usr/bin/tesseract"
+
+pytesseract.pytesseract.tesseract_cmd = tesseract_path
+
+# Carpeta tessdata dinámica relativa al archivo extractor.py
+base_dir = os.path.dirname(os.path.abspath(__file__))
+tessdata_dir = os.environ.get("TESSDATA_PREFIX")
+if not tessdata_dir:
+    tessdata_dir = os.path.join(base_dir, "tessdata")
+tessdata_dir = tessdata_dir.replace("\\", "/")
 os.environ["TESSDATA_PREFIX"] = tessdata_dir
 
 # Tabla de mapeo estándar de tratamientos según leeme.md
