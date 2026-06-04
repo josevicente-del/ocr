@@ -26,5 +26,5 @@ ENV TESSDATA_PREFIX="/usr/share/tesseract-ocr/5/tessdata"
 # Exponer el puerto por defecto de la aplicación
 EXPOSE 8000
 
-# Comando para iniciar la aplicación usando Uvicorn
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+# Comando para iniciar la aplicación usando Uvicorn leyendo la variable PORT asignada por Render
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]

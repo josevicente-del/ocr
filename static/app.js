@@ -32,11 +32,12 @@ let socket = null;
 
 // Lista de tratamientos estándar ERP para el selector
 const STANDARD_ERP_TREATMENTS = [
-    "RAL 7016 TEXTURADO",
-    "GRATADO",
-    "BASE MADERA TONO 8",
-    "PLATA 15 MICRAS",
-    "ROBLE RUSTICO-S"
+    "ANODIZADO PLATA GRATA",
+    "RAL BLANCO",
+    "ROBLE RUSTICO-S",
+    "PINO NUDO (BC-1)",
+    "PLATA MATE",
+    "RAL 7016 TEXTURADO"
 ];
 
 // --- Inicialización y WebSocket ---

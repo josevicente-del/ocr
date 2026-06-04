@@ -145,6 +145,8 @@ async def process_pdf_background(file_path: str):
                 
             # 3. Procesar las páginas secuencialmente en lotes de 10 para evitar Rate Limit 429
             async def progress_callback(page_num, res):
+                # Guardar el resultado de la página procesada en tiempo real
+                db_state["orders"][str(page_num)] = res
                 db_state["processed_pages"] = len(db_state["orders"])
                 elapsed = time.time() - start_time
                 db_state["elapsed_time"] = elapsed
@@ -152,6 +154,9 @@ async def process_pdf_background(file_path: str):
                 avg_time = elapsed / db_state["processed_pages"] if db_state["processed_pages"] > 0 else 1.0
                 remaining = total - db_state["processed_pages"]
                 db_state["expected_time_remaining"] = avg_time * remaining
+                
+                # Persistir el progreso parcial
+                save_db()
                 
                 # Notificar progreso vía WebSocket
                 await broadcast_status({
@@ -177,13 +182,15 @@ async def process_pdf_background(file_path: str):
             db_state["orders"] = {}
             save_db()
             
-            # Fallback a Tesseract local
+            # Fallback a Tesseract local (ejecutado de forma asíncrona para no bloquear el loop)
             start_time = time.time()
             for idx in range(total):
                 page = doc[idx]
                 page_num = idx + 1
                 
-                res = process_pdf_page(page, page_num, db_state["custom_mappings"])
+                # Ejecutar process_pdf_page en un hilo separado para evitar bloquear el bucle de eventos de FastAPI.
+                # De este modo, la API (ej: /api/status) y los WebSockets siguen respondiendo durante el OCR local.
+                res = await asyncio.to_thread(process_pdf_page, page, page_num, db_state["custom_mappings"])
                 db_state["orders"][str(page_num)] = res
                 
                 db_state["processed_pages"] = page_num

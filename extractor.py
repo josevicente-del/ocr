@@ -11,6 +11,7 @@ import os
 import io
 import json
 import httpx
+import asyncio
 from PIL import Image
 import pytesseract
 
@@ -29,13 +30,14 @@ if not tessdata_dir:
 tessdata_dir = tessdata_dir.replace("\\", "/")
 os.environ["TESSDATA_PREFIX"] = tessdata_dir
 
-# Tabla de mapeo estándar de tratamientos según leeme.md
+# Tabla de mapeo estándar de tratamientos según leeme.md y la nueva tabla de equivalencias
 TRATAMIENTOS_ESTANDAR = {
-    "RAL 7016 TEXTURADO": "RAL 7016 TEXTURADO",
-    "GRATADO": "GRATADO",
-    "BASE MADERA TONO 8": "BASE MADERA TONO 8",
-    "PLATA 15 MICRAS": "PLATA 15 MICRAS",
-    "ROBLE RUSTICO-S": "ROBLE RUSTICO-S"
+    "ANODIZADO PLATA GRATA": "ANODIZADO PLATA GRATA",
+    "RAL BLANCO": "RAL BLANCO",
+    "ROBLE RUSTICO-S": "ROBLE RUSTICO-S",
+    "PINO NUDO (BC-1)": "PINO NUDO (BC-1)",
+    "PLATA MATE": "PLATA MATE",
+    "RAL 7016 TEXTURADO": "RAL 7016 TEXTURADO"
 }
 
 def clean_extracted_order(text):
@@ -245,6 +247,53 @@ def clean_client_name_text(text: str) -> str:
         
     return text.upper()
 
+def extract_client_by_spatial_coords(normalized_words) -> str:
+    """
+    Busca el nombre del cliente basándose en las coordenadas espaciales:
+    1. Localiza una palabra en la parte superior izquierda que comience con 'B' (o '8')
+       y que tenga el formato o longitud de un CIF/NIF.
+    2. Extrae las palabras que están justo encima de este CIF (misma zona vertical, línea anterior).
+    """
+    cif_pattern = re.compile(r'^[B8]\s*\'?\s*[tT]?\s*-?\d[\d\-\s]{6,12}$')
+    cif_word = None
+    
+    # Buscar el CIF en la esquina superior izquierda (vertical x < 185, horizontal y < 350)
+    for w in normalized_words:
+        w_x = (w[0] + w[2]) / 2 # vertical
+        w_y = (w[1] + w[3]) / 2 # horizontal
+        
+        if w_x < 180 and w_y < 350:
+            text_clean = re.sub(r'[^A-Z0-9]', '', w[4].upper())
+            if re.match(r'^[B8]\d{7,10}$', text_clean) or (text_clean.startswith('B') and len(text_clean) >= 8):
+                cif_word = w
+                break
+                
+    if not cif_word:
+        return ""
+        
+    cif_x0 = cif_word[0]
+    cif_y0 = cif_word[1]
+    
+    # Buscar palabras en la línea inmediatamente superior (diferencia de x entre 5 y 25 puntos)
+    # y que estén alineadas hacia la izquierda (y < 380 puntos)
+    above_words = []
+    for w in normalized_words:
+        w_x = (w[0] + w[2]) / 2
+        w_y = (w[1] + w[3]) / 2
+        
+        if (cif_x0 - 25.0) <= w_x < (cif_x0 - 2.0):
+            if w_y < 380.0:
+                above_words.append(w)
+                
+    if not above_words:
+        return ""
+        
+    # Ordenar palabras horizontalmente (izquierda a derecha) y unirlas
+    above_words.sort(key=lambda w: w[1])
+    client_name = " ".join([w[4] for w in above_words]).strip()
+    
+    return clean_client_name_text(client_name)
+
 def clean_quantity(raw):
     """
     Limpia el texto de la cantidad extraída y lo convierte a entero.
@@ -267,6 +316,21 @@ def clean_article_code(raw):
     s = re.sub(r'\D', '', s)
     return s
 
+def clean_treatment_raw(text: str) -> str:
+    """
+    Limpia el texto del tratamiento crudo removiendo especificaciones de aleación
+    como 'PERFILES 6060-T5', '6060-T5' o similares que no son acabados reales.
+    """
+    if not text:
+        return ""
+    # Quitar "PERFILES 6060-T5" y variantes (ej: "PERFIL 6060 T5", "6060-T5", etc.)
+    cleaned = re.sub(r'\bPERFILES?\s*6060\s*-?\s*T5\b', '', text, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\b6060\s*-?\s*T5\b', '', cleaned, flags=re.IGNORECASE)
+    # Limpiar espacios extra y puntuación inicial/final
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    cleaned = cleaned.strip(".,_- ")
+    return cleaned
+
 def fuzzy_map_treatment(raw_treatment, custom_mappings=None):
     """
     Mapea el tratamiento leído por OCR al tratamiento estándar deseado en ERP.
@@ -275,25 +339,40 @@ def fuzzy_map_treatment(raw_treatment, custom_mappings=None):
     if not raw_treatment:
         return None
         
+    # Limpiar espacios y caracteres especiales para comparación robusta
     cleaned = re.sub(r'[^A-Z0-9]', '', raw_treatment.upper())
     
-    # Comprobar mapeos personalizados primero
+    # Comprobar mapeos personalizados del usuario primero (definidos dinámicamente)
     if custom_mappings and raw_treatment in custom_mappings:
         return custom_mappings[raw_treatment]
     if custom_mappings and cleaned in custom_mappings:
         return custom_mappings[cleaned]
         
-    # Reglas estándar
+    # Reglas estándar basadas en la nueva tabla de equivalencias de la imagen:
+    
+    # 1. RAL 7016 TX -> RAL 7016 TEXTURADO
     if "7016" in cleaned or "7015" in cleaned or "70A6" in cleaned or "7016TXT" in cleaned:
         return "RAL 7016 TEXTURADO"
+        
+    # 2. GRATADO -> ANODIZADO PLATA GRATA (también ANODIZADO PLATA GRATA / REPULIDA)
     if "GRATA" in cleaned or "GRATADO" in cleaned or "REPULIDA" in cleaned:
-        return "GRATADO"
-    if "PINONUDO" in cleaned or "BC1" in cleaned or "BCL" in cleaned:
-        return "BASE MADERA TONO 8"
-    if "PLATA" in cleaned and "MATE" in cleaned:
-        return "PLATA 15 MICRAS"
+        return "ANODIZADO PLATA GRATA"
+        
+    # 3. LACADO TONO BASE PINO MATE -> PINO NUDO (BC-1) (también PINO NUDO (BC-1) / BASE MADERA TONO 8)
+    if "PINO" in cleaned or "BC1" in cleaned or "BCL" in cleaned or "MADERA" in cleaned:
+        return "PINO NUDO (BC-1)"
+        
+    # 4. PLATA 15 MICRAS -> PLATA MATE (también ANODIZADADO PLATA MATE)
+    if "PLATA" in cleaned and ("MATE" in cleaned or "15" in cleaned or "MICRA" in cleaned):
+        return "PLATA MATE"
+        
+    # 5. LACADO TONO BASE GOLDEN -> ROBLE RUSTICO-S (también GOLDEN / ROBLE / RUSTICO)
     if "GOLDEN" in cleaned or "ROBLE" in cleaned or "RUSTICO" in cleaned:
         return "ROBLE RUSTICO-S"
+        
+    # 6. LACADO BLANCO -> RAL BLANCO (también RAL BLANCO / RAL BLANCO PERFILES 6060-T5)
+    if "BLANCO" in cleaned:
+        return "RAL BLANCO"
         
     return None
 
@@ -427,7 +506,10 @@ def process_pdf_page(page, page_num, custom_mappings=None):
             
     order_num = clean_extracted_order(raw_order_text) if raw_order_text else f"UNKNOWN-P{page_num}"
     order_date = clean_extracted_date(raw_date_text) if raw_date_text else "UNKNOWN"
-    client_name = clean_extracted_client(raw_client_text)
+    
+    # Intentar extraer el nombre del cliente usando la regla de posición espacial respecto al CIF
+    spatial_client = extract_client_by_spatial_coords(normalized_words)
+    client_name = spatial_client if spatial_client else clean_extracted_client(raw_client_text)
     
     # 3. Detectar punto de anclaje
     anchor_x = find_anchor_x(normalized_words)
@@ -560,7 +642,7 @@ def process_pdf_page(page, page_num, custom_mappings=None):
         treat_words.sort(key=lambda w: w[1])
         
         desc_str = " ".join([w[4] for w in desc_words]).strip()
-        treat_raw = " ".join([w[4] for w in treat_words]).strip()
+        treat_raw = clean_treatment_raw(" ".join([w[4] for w in treat_words]))
         
         # Mapear tratamiento
         treat_mapped = fuzzy_map_treatment(treat_raw, custom_mappings)
@@ -729,7 +811,7 @@ async def extract_page_with_mistral_async(markdown_text: str, page_num: int, cus
     problem_details = []
     
     for idx, art in enumerate(extracted.get("articles", [])):
-        treat_raw = art.get("treatment_raw", "").strip()
+        treat_raw = clean_treatment_raw(art.get("treatment_raw", ""))
         treat_mapped = fuzzy_map_treatment(treat_raw, custom_mappings)
         
         if treat_raw and not treat_mapped:
@@ -906,7 +988,7 @@ async def extract_document_batch_with_mistral_async(markdown_pages: list[str], c
             problem_details = []
             
             for idx_art, art in enumerate(page_data.get("articles", [])):
-                treat_raw = art.get("treatment_raw", "").strip()
+                treat_raw = clean_treatment_raw(art.get("treatment_raw", ""))
                 treat_mapped = fuzzy_map_treatment(treat_raw, custom_mappings)
                 
                 if treat_raw and not treat_mapped:
