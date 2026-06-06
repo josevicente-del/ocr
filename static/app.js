@@ -34,6 +34,7 @@ const loaderOverlay = document.getElementById("loader-overlay");
 let currentColumns = [];
 let socket = null;
 let ordersData = {}; // Guarda los pedidos consolidados para actualizar incrementalmente la UI
+let pollingInterval = null; // Intervalo para el fallback de polling HTTP en tiempo real
 
 // Lista de tratamientos estándar ERP para el selector
 const STANDARD_ERP_TREATMENTS = [
@@ -51,6 +52,11 @@ function connectWebSocket() {
     const wsUrl = `${protocol}//${window.location.host}/ws`;
     
     socket = new WebSocket(wsUrl);
+    
+    socket.onopen = function() {
+        console.log("WebSocket conectado con éxito. Apagando fallback de polling.");
+        stopPolling();
+    };
     
     socket.onmessage = function(event) {
         const data = JSON.parse(event.data);
@@ -92,7 +98,14 @@ function connectWebSocket() {
         }
     };
     
+    socket.onerror = function() {
+        console.log("Error en WebSocket. Activando fallback de polling...");
+        startPolling();
+    };
+    
     socket.onclose = function() {
+        console.log("WebSocket cerrado. Activando fallback de polling...");
+        startPolling();
         // Intentar reconectar después de 3 segundos
         setTimeout(connectWebSocket, 3000);
     };
@@ -159,6 +172,49 @@ async function refreshStatus() {
         console.error("Error al obtener estado:", e);
     } finally {
         loaderOverlay.classList.add("hidden");
+    }
+}
+
+// --- Polling de Fallback en Caso de Fallo de WebSocket ---
+function startPolling() {
+    if (pollingInterval) return;
+    console.log("Iniciando fallback de polling HTTP de progreso...");
+    pollingInterval = setInterval(async () => {
+        try {
+            const res = await fetch("/api/status");
+            const status = await res.json();
+            
+            // Sincronizar UI con los datos de pedidos recibidos
+            ordersData = status.orders_data;
+            updateUIFromOrders(ordersData);
+            
+            if (status.is_processing) {
+                processingStatus.classList.remove("hidden");
+                const percent = status.total_pages > 0 ? (status.processed_pages / status.total_pages) * 100 : 0;
+                
+                conversionProgressBar.style.width = `${percent}%`;
+                conversionProgressText.innerText = `Procesando página ${status.processed_pages} de ${status.total_pages}...`;
+                
+                if (status.expected_time_remaining > 0) {
+                    timeRemaining.innerText = `Tiempo restante estimado: ${status.expected_time_remaining}s`;
+                } else {
+                    timeRemaining.innerText = "Tiempo restante estimado: calculando...";
+                }
+            } else {
+                processingStatus.classList.add("hidden");
+                stopPolling();
+            }
+        } catch (e) {
+            console.error("Error en polling HTTP de progreso:", e);
+        }
+    }, 3000);
+}
+
+function stopPolling() {
+    if (pollingInterval) {
+        clearInterval(pollingInterval);
+        pollingInterval = null;
+        console.log("Detenido el fallback de polling HTTP.");
     }
 }
 

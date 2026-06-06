@@ -28,4 +28,4 @@ ENV OMP_THREAD_LIMIT=1
 EXPOSE 8000
 
 # Comando para iniciar la aplicación usando Uvicorn leyendo la variable PORT asignada por Render
-CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'"]

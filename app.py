@@ -344,6 +344,7 @@ async def get_status():
         "is_processing": db_state["is_processing"],
         "processed_pages": db_state["processed_pages"],
         "total_pages": db_state["total_pages"],
+        "expected_time_remaining": round(db_state["expected_time_remaining"], 1),
         "orders_count": len(order_numbers),
         "articles_count": total_articles,
         "unresolved_count": len(unresolved_items),
