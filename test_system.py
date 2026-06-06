@@ -44,7 +44,9 @@ def test_api_endpoints():
         "Cliente",
         "BAR Pedidas",
         "DESDESG",
-        "Tratamiento"
+        "Tratamiento",
+        "Serie",
+        "Medida"
     ]
     response = client.post("/api/columns", json={"column_order": custom_order})
     assert response.status_code == 200
@@ -61,11 +63,13 @@ def test_api_endpoints():
             "articles": [
                 {
                     "code": "08255964",
+                    "serie": "08255",
                     "quantity": 2,
                     "description": "MARCO SUPERIOR",
                     "treatment_raw": "RAL BLANCO",
                     "treatment_mapped": "PENDIENTE_CONFIRMACION",
-                    "needs_resolution": True
+                    "needs_resolution": True,
+                    "measure": "6,40"
                 }
             ],
             "had_problem": True,
@@ -115,17 +119,19 @@ def test_api_endpoints():
     ws = wb["Hoja1"]
     
     # Verificar cabeceras de columnas configuradas
-    headers = [ws.cell(row=1, column=c).value for c in range(1, 7)]
+    headers = [ws.cell(row=1, column=c).value for c in range(1, 9)]
     assert headers == custom_order
     
     # Verificar datos de fila
-    row2 = [ws.cell(row=2, column=c).value for c in range(1, 7)]
+    row2 = [ws.cell(row=2, column=c).value for c in range(1, 9)]
     assert row2[0] == "38-2026F0110003587"  # Nmero Pedido Cliente
     assert row2[1] == "04/06/2026"           # Fecha Pedido
     assert row2[2] == "ALUMELUM EN MURCIA"   # Cliente
     assert row2[3] == 2                      # BAR Pedidas
     assert row2[4] == "08255964 MARCO SUPERIOR" # DESDESG
     assert row2[5] == "RAL BLANCO ERP"       # Tratamiento
+    assert row2[6] == "08255"                # Serie
+    assert row2[7] == "6,40"                 # Medida
     
     wb.close()
     os.remove(temp_file)

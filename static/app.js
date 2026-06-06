@@ -291,7 +291,7 @@ function renderTable(ordersData) {
         const tr = document.createElement("tr");
         const td = document.createElement("td");
         td.className = "empty-table";
-        td.colSpan = 9;
+        td.colSpan = 11;
         td.innerText = "No se han procesado archivos en este lote. Sube un PDF para comenzar.";
         tr.appendChild(td);
         tableBody.appendChild(tr);
@@ -346,6 +346,16 @@ function renderTable(ordersData) {
             const tdTreat = document.createElement("td");
             tdTreat.innerText = art.treatment_mapped;
             tr.appendChild(tdTreat);
+            
+            // Serie
+            const tdSerie = document.createElement("td");
+            tdSerie.innerText = art.serie || "";
+            tr.appendChild(tdSerie);
+            
+            // Medida
+            const tdMeasure = document.createElement("td");
+            tdMeasure.innerText = art.measure || "";
+            tr.appendChild(tdMeasure);
             
             // Estado
             const tdStatus = document.createElement("td");
@@ -454,7 +464,7 @@ btnReset.addEventListener("click", async () => {
         btnExportExcel.disabled = true;
         btnExportCsv.disabled = true;
         resolverCard.classList.add("hidden");
-        tableBody.innerHTML = '<tr><td colspan="9" class="empty-table">No se han procesado archivos en este lote. Sube un PDF para comenzar.</td></tr>';
+        tableBody.innerHTML = '<tr><td colspan="11" class="empty-table">No se han procesado archivos en este lote. Sube un PDF para comenzar.</td></tr>';
         
         await refreshStatus();
     } catch (e) {

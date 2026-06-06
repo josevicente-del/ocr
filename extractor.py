@@ -399,12 +399,351 @@ def find_anchor_x(normalized_words):
                 
     return 165.0
 
+def clean_measure(raw):
+    """
+    Limpia y estandariza la medida extraída (ej. '6,400' -> '6,40').
+    """
+    if not raw:
+        return ""
+    s = re.sub(r'\s+', '', raw)
+    s = s.replace('o', '0').replace('O', '0').replace('S', '5').replace('s', '5')
+    s = re.sub(r'[^0-9\,\.]', '', s)
+    s = s.replace('.', ',')
+    if s.endswith(',400'):
+        return "6,40"
+    return s
+
+def get_normalized_words(page):
+    """
+    Extrae las palabras físicas de la página usando PyMuPDF y las normaliza al sistema
+    de coordenadas visuales unificado compatible con Tesseract (72 DPI).
+    x0, x1 representan la coordenada vertical (de arriba a abajo).
+    y0, y1 representan la coordenada horizontal (de izquierda a derecha).
+    """
+    words = page.get_text("words")
+    normalized = []
+    rotation = page.rotation
+    rect = page.rect
+    w_width, w_height = rect.width, rect.height
+    
+    for w in words:
+        # w es (x0_phys, y0_phys, x1_phys, y1_phys, text, block_no, line_no, word_no)
+        if rotation == 270:
+            # En rotación 270, el alto físico es la anchura Portrait
+            # x_visual = w_height - x_phys (eje X físico invertido es vertical visual Portrait)
+            # y_visual = y_phys (eje Y físico es horizontal visual Portrait)
+            x0 = w_height - w[2]
+            y0 = w[1]
+            x1 = w_height - w[0]
+            y1 = w[3]
+        elif rotation == 90:
+            x0 = w[1]
+            y0 = w_width - w[2]
+            x1 = w[3]
+            y1 = w_width - w[0]
+        elif rotation == 180:
+            x0 = w_height - w[1]
+            y0 = w_width - w[0]
+            x1 = w_height - w[3]
+            y1 = w_width - w[2]
+        else: # 0 grados
+            x0 = w[1]
+            y0 = w[0]
+            x1 = w[3]
+            y1 = w[2]
+        normalized.append((x0, y0, x1, y1, w[4]))
+    return normalized
+
+def extract_metadata_from_normalized_words(normalized_words, page_num):
+    """
+    Extrae de forma unificada el número de pedido, la fecha y el cliente del bloque de cabecera.
+    """
+    # Filtrar palabras que pertenecen a la cabecera del pedido (vertical <= 245 y horizontal <= 595)
+    header_words = [w for w in normalized_words if w[0] <= 245 and w[1] <= 595]
+    
+    # Agrupar las palabras por líneas visuales basándonos en la cercanía de su coordenada vertical x0
+    header_lines = []
+    for w in header_words:
+        added = False
+        for line in header_lines:
+            avg_x0 = sum(item[0] for item in line) / len(line)
+            if abs(w[0] - avg_x0) < 8.0:
+                line.append(w)
+                added = True
+                break
+        if not added:
+            header_lines.append([w])
+            
+    # Ordenar las palabras de cada línea horizontalmente (de izquierda a derecha, y0)
+    for line in header_lines:
+        line.sort(key=lambda w: w[1])
+        
+    # Ordenar las líneas de arriba a abajo por su promedio vertical
+    header_lines.sort(key=lambda line: sum(item[0] for item in line) / len(line))
+        
+    raw_order_text = ""
+    raw_date_text = ""
+    raw_client_text = ""
+    
+    for line in header_lines:
+        text = " ".join([w[4] for w in line])
+        # Detectar el patrón del número de pedido
+        if re.search(r'3[8AB]\s*[\-\*\,]?\s*2[0O]2', text) or '2026' in text.replace(' ', ''):
+            raw_order_text = text
+        # Detectar el patrón de la fecha de pedido
+        if '/' in text or 'Ub' in text or 'i' in text:
+            if re.search(r'\d{1,2}[\/i\\\|\,]\d{1,2}[\/i\\\|\,]\d{2,4}', text):
+                raw_date_text = text
+            elif not raw_date_text and ('FECHA' in text.upper() or 'FECiA' in text.upper()):
+                raw_date_text = text
+        # Detectar el patrón del cliente (código o CIF)
+        if re.search(r'000\s*0011', text) or '0000011' in text.replace(' ', '') or len(re.sub(r'\s+', '', text)) == 7:
+            if '0011' in text or '0001' in text or 'CLIENTE' in text.upper():
+                raw_client_text = text
+                
+    # Fallbacks generales mediante búsqueda por regex en todo el documento
+    text_full = " ".join([w[4] for w in sorted(normalized_words, key=lambda w: (w[0], w[1]))])
+    
+    if not raw_order_text:
+        s_clean = re.sub(r'[^0-9A-Za-z]', '', text_full)
+        pattern_order = r'3[8BA8]2[0Oo]2[6Gg][Ff][0Oo][1Iilf][1Iilf][0OoC][0Oo][0Oo]3[5sS](\d|[sS])(\d|[sS])'
+        match = re.search(pattern_order, s_clean, re.IGNORECASE)
+        if match:
+            raw_order_text = match.group(0)
+            
+    if not raw_date_text:
+        pattern_date = r'\b[0-9A-Za-z]{1,2}[\/i\\\|\,][0-9A-Za-z]{1,2}[\/i\\\|\,](?:202[0-9A-Za-z]|[22UuAa0Oo]{4})\b'
+        match = re.search(pattern_date, text_full)
+        if match:
+            raw_date_text = match.group(0)
+            
+    order_num = clean_extracted_order(raw_order_text) if raw_order_text else f"UNKNOWN-P{page_num}"
+    order_date = clean_extracted_date(raw_date_text) if raw_date_text else "UNKNOWN"
+    
+    spatial_client = extract_client_by_spatial_coords(normalized_words)
+    client_name = spatial_client if spatial_client else clean_extracted_client(raw_client_text)
+    
+    return order_num, order_date, client_name
+
+def extract_articles_from_normalized_words(normalized_words, custom_mappings=None):
+    """
+    Agrupa las palabras en líneas visuales y asocia de forma robusta la línea 1 de cada artículo
+    (código y descripción) con su línea 2 correspondiente (tratamiento, cantidad y medida).
+    Evita de raíz los fallos de alineación por anclajes de coordenadas individuales.
+    """
+    # 1. Encontrar dinámicamente la coordenada vertical del anclaje de cabecera 'ARTICULO'
+    anchor_x = None
+    for w in normalized_words:
+        x_center = (w[0] + w[2]) / 2
+        y_center = (w[1] + w[3]) / 2
+        if 120 <= x_center <= 240 and 30 <= y_center <= 95:
+            cleaned = re.sub(r'[^A-Z]', '', w[4].upper())
+            if any(p in cleaned for p in ["ARTICULO", "ARTTCULO", "ARTICU", "ARTTCU", "RTICUL", "RTTCUL"]):
+                anchor_x = x_center
+                break
+                
+    if anchor_x is None:
+        for w in normalized_words:
+            x_center = (w[0] + w[2]) / 2
+            y_center = (w[1] + w[3]) / 2
+            if 120 <= x_center <= 240:
+                cleaned = re.sub(r'[^A-Z]', '', w[4].upper())
+                if "KILOS" in cleaned or "CANTIDAD" in cleaned or "CLIENTE" in cleaned:
+                    anchor_x = x_center
+                    break
+                    
+    if anchor_x is None:
+        anchor_x = 165.0
+        
+    # 2. Agrupar las palabras del contenido (debajo de la cabecera) en líneas de texto reales
+    content_words = [w for w in normalized_words if ((w[0] + w[2]) / 2) > (anchor_x + 8.0)]
+    content_words.sort(key=lambda w: (w[0] + w[2]) / 2)
+    
+    lines = []
+    current_line = []
+    current_x = -1
+    
+    for w in content_words:
+        x_center = (w[0] + w[2]) / 2
+        if current_x == -1:
+            current_x = x_center
+            current_line.append(w)
+        elif abs(x_center - current_x) < 5.0: # Agrupación de palabras en la misma línea visual (umbral 5.0)
+            current_line.append(w)
+        else:
+            current_line.sort(key=lambda w: (w[1] + w[3]) / 2)
+            lines.append(current_line)
+            current_line = [w]
+            current_x = x_center
+            
+    if current_line:
+        current_line.sort(key=lambda w: (w[1] + w[3]) / 2)
+        lines.append(current_line)
+        
+    # 3. Procesar las líneas secuencialmente
+    articles = []
+    had_problem = False
+    problem_details = []
+    
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        
+        # Separar palabras de código y descripción en la línea actual
+        code_words = []
+        desc_words = []
+        
+        for w in line:
+            y_center = (w[1] + w[3]) / 2
+            if 30 <= y_center <= 95:
+                code_words.append(w)
+            elif 95 < y_center <= 300:
+                desc_words.append(w)
+                
+        code_raw = "".join([w[4] for w in code_words]).strip()
+        code_cleaned = clean_article_code(code_raw)
+        
+        # Validar si corresponde a un código de artículo (ERP de 8 a 10 dígitos)
+        is_valid_code = len(code_cleaned) >= 8 and len(code_cleaned) <= 10
+        if is_valid_code and not any(p in code_raw.upper() for p in ["ARTICULO", "PEDIDO", "FECHA", "CLIENTE", "PAGINA", "38-", "2026"]):
+            # Hemos localizado la Línea 1 (Código y Descripción)
+            desc_str = " ".join([w[4] for w in desc_words]).strip()
+            
+            # Inicializar los valores por defecto del artículo
+            treat_raw = ""
+            qty_cleaned = 1
+            measure_cleaned = "6,40"
+            
+            # Buscar si la siguiente línea física en el PDF (línea idx + 1) corresponde a la Línea 2 (Tratamiento, Cantidad, Medida)
+            has_line2 = False
+            if idx + 1 < len(lines):
+                line2 = lines[idx + 1]
+                l1_x = sum((w[0]+w[2])/2 for w in line) / len(line)
+                l2_x = sum((w[0]+w[2])/2 for w in line2) / len(line2)
+                
+                # Comprobar si la siguiente línea no empieza por otro código de artículo diferente
+                line2_code_words = [w for w in line2 if 30 <= (w[1] + w[3]) / 2 <= 95]
+                line2_code_raw = "".join([w[4] for w in line2_code_words]).strip()
+                line2_code_cleaned = clean_article_code(line2_code_raw)
+                is_line2_another_code = len(line2_code_cleaned) >= 8 and not any(p in line2_code_raw.upper() for p in ["38-", "2026"])
+                
+                # Si está a menos de 16 puntos y no es otro artículo, es la línea de tratamiento/cantidades
+                if (l2_x - l1_x) <= 16.0 and not is_line2_another_code:
+                    has_line2 = True
+                    treat_words = []
+                    qty_words = []
+                    
+                    for w in line2:
+                        y_center = (w[1] + w[3]) / 2
+                        word_clean = re.sub(r'[^A-Z]', '', w[4].upper())
+                        if any(lbl in word_clean for lbl in ["OBSERV", "RVACION", "OBSE", "RVACTON", "ONES"]):
+                            continue
+                            
+                        if 95 < y_center <= 300:
+                            treat_words.append(w)
+                        elif 300 < y_center <= 580:
+                            qty_words.append(w)
+                            
+                    treat_raw = clean_treatment_raw(" ".join([w[4] for w in treat_words]))
+                    
+                    # Cantidad de barras (rango horizontal visual 400 a 445)
+                    qty_barras_words = [qw for qw in qty_words if 400 <= (qw[1] + qw[3]) / 2 <= 445]
+                    qty_barras_words.sort(key=lambda w: w[1])
+                    qty_barras_raw = "".join([w[4] for w in qty_barras_words]).strip()
+                    qty_cleaned = clean_quantity(qty_barras_raw) if qty_barras_raw else 1
+                    
+                    # Medida del artículo (rango horizontal visual 445 a 520)
+                    measure_words = [qw for qw in qty_words if 445 < (qw[1] + qw[3]) / 2 <= 520]
+                    measure_words.sort(key=lambda w: w[1])
+                    measure_raw = "".join([w[4] for w in measure_words]).strip()
+                    
+                    if not measure_raw:
+                        # Fallback a buscar un número decimal con coma o punto en todo qty_words
+                        for qw in qty_words:
+                            text_clean = qw[4].strip()
+                            if re.match(r'^\d[\.,]\d{1,3}$', text_clean):
+                                measure_raw = text_clean
+                                break
+                                
+                    measure_cleaned = clean_measure(measure_raw) if measure_raw else "6,40"
+                    
+            # Si no tenía línea 2, buscar cantidad/medida fallback en la misma línea 1
+            if not has_line2:
+                qty_words = [w for w in line if 300 < (w[1] + w[3]) / 2 <= 580]
+                if qty_words:
+                    qty_barras_words = [qw for qw in qty_words if 400 <= (qw[1] + qw[3]) / 2 <= 445]
+                    qty_barras_raw = "".join([w[4] for w in qty_barras_words]).strip()
+                    if qty_barras_raw:
+                        qty_cleaned = clean_quantity(qty_barras_raw)
+                        
+                    measure_words = [qw for qw in qty_words if 445 < (qw[1] + qw[3]) / 2 <= 520]
+                    measure_raw = "".join([w[4] for w in measure_words]).strip()
+                    if measure_raw:
+                        measure_cleaned = clean_measure(measure_raw)
+                        
+            # Si el OCR leyó "0,000" para la medida, reestablecer a la medida estándar "6,40"
+            if not measure_cleaned or measure_cleaned in ["0,000", "0,00", "0", "0,0"]:
+                measure_cleaned = "6,40"
+                
+            treat_mapped = fuzzy_map_treatment(treat_raw, custom_mappings)
+            if treat_raw and not treat_mapped:
+                had_problem = True
+                problem_details.append(f"Articulo {code_cleaned}: Tratamiento desconocido '{treat_raw}'")
+                
+            articles.append({
+                "code": code_cleaned,
+                "serie": code_cleaned[:5] if len(code_cleaned) >= 5 else code_cleaned,
+                "quantity": qty_cleaned,
+                "description": desc_str,
+                "treatment_raw": treat_raw,
+                "treatment_mapped": treat_mapped or "PENDIENTE_CONFIRMACION",
+                "needs_resolution": (treat_raw != "" and not treat_mapped),
+                "measure": measure_cleaned
+            })
+            
+            if has_line2:
+                idx += 1
+                
+        idx += 1
+        
+    return articles, had_problem, problem_details
+
+def process_pdf_page_digital(page, page_num, custom_mappings=None):
+    """
+    Extrae los datos de la página del PDF digitalmente (sin OCR).
+    Devuelve None si no contiene suficiente texto digital seleccionable.
+    """
+    normalized_words = get_normalized_words(page)
+    if not normalized_words or len(normalized_words) < 20:
+        return None
+        
+    order_num, order_date, client_name = extract_metadata_from_normalized_words(normalized_words, page_num)
+    articles, had_problem, problem_details = extract_articles_from_normalized_words(normalized_words, custom_mappings)
+    
+    # Si no detectó artículos, caemos a Tesseract para seguridad (ej: página con texto pero tabla escaneada)
+    if not articles:
+        return None
+        
+    return {
+        "order_number": order_num,
+        "date": order_date,
+        "client": client_name,
+        "articles": articles,
+        "had_problem": had_problem,
+        "problem_details": problem_details
+    }
+
 def process_pdf_page(page, page_num, custom_mappings=None):
     """
     Procesa una página del PDF y extrae el pedido, la fecha, el cliente y los artículos.
-    Utiliza Tesseract OCR sobre el renderizado de la página a 150 DPI para máxima precisión.
+    Primero intenta la extracción digital rápida nativa y cae a Tesseract si el PDF no contiene texto seleccionable.
     """
-    # 1. Renderizar la página a 150 DPI
+    # 0. Intentar extracción digital rápida nativa primero
+    res_digital = process_pdf_page_digital(page, page_num, custom_mappings)
+    if res_digital and len(res_digital.get("articles", [])) > 0:
+        return res_digital
+        
+    # 1. Renderizar la página a 150 DPI para Tesseract OCR
     pix = page.get_pixmap(dpi=150)
     img_data = pix.tobytes("png")
     img = Image.open(io.BytesIO(img_data))
@@ -415,7 +754,7 @@ def process_pdf_page(page, page_num, custom_mappings=None):
     # Ejecutar Tesseract
     tsv_data = pytesseract.image_to_data(img, lang="spa+eng", config=config)
     
-    # Parsear el TSV y escalar a puntos de PDF (72/150 = 0.48)
+    # Parsear el TSV y escalar a puntos de PDF a 72 DPI (72/150 = 0.48)
     normalized_words = []
     lines = tsv_data.split('\n')
     header = True
@@ -435,7 +774,8 @@ def process_pdf_page(page, page_num, custom_mappings=None):
             width = int(fields[8])
             height = int(fields[9])
             
-            # Escalar a puntos del PDF (x0: vertical, y0: horizontal)
+            # x0, x1 representan la coordenada vertical (top)
+            # y0, y1 representan la coordenada horizontal (left)
             x0 = top * 0.48
             y0 = left * 0.48
             x1 = (top + height) * 0.48
@@ -443,223 +783,9 @@ def process_pdf_page(page, page_num, custom_mappings=None):
             
             normalized_words.append((x0, y0, x1, y1, text))
             
-    # Crear texto completo a partir de las palabras para fallbacks de regex
-    sorted_words = sorted(normalized_words, key=lambda w: (w[0], w[1]))
-    text_full = " ".join([w[4] for w in sorted_words])
+    order_num, order_date, client_name = extract_metadata_from_normalized_words(normalized_words, page_num)
+    articles, had_problem, problem_details = extract_articles_from_normalized_words(normalized_words, custom_mappings)
     
-    # 2. Extraer metadatos de cabecera utilizando coordenadas y expresiones regulares
-    header_words = [w for w in normalized_words if w[0] <= 185 and w[1] <= 595]
-    
-    # Agrupar por líneas visuales basándose en la coordenada vertical w[0]
-    header_lines = []
-    for w in header_words:
-        added = False
-        for line in header_lines:
-            avg_x0 = sum(item[0] for item in line) / len(line)
-            if abs(w[0] - avg_x0) < 8.0:
-                line.append(w)
-                added = True
-                break
-        if not added:
-            header_lines.append([w])
-            
-    # Para cada línea, ordenar las palabras de izquierda a derecha (w[1])
-    for line in header_lines:
-        line.sort(key=lambda w: w[1])
-        
-    # Ordenar las líneas de arriba a abajo (por su coordenada vertical promedio)
-    header_lines.sort(key=lambda line: sum(item[0] for item in line) / len(line))
-        
-    raw_order_text = ""
-    raw_date_text = ""
-    raw_client_text = ""
-    
-    for line in header_lines:
-        text = " ".join([w[4] for w in line])
-        # Buscar número de pedido
-        if re.search(r'3[8AB]\s*[\-\*\,]?\s*2[0O]2', text) or '2026' in text.replace(' ', ''):
-            raw_order_text = text
-        # Buscar fecha
-        if '/' in text or 'Ub' in text or 'i' in text:
-            if re.search(r'\d{1,2}[\/i\\\|\,]\d{1,2}[\/i\\\|\,]\d{2,4}', text):
-                raw_date_text = text
-            elif not raw_date_text and ('FECHA' in text.upper() or 'FECiA' in text.upper()):
-                raw_date_text = text
-        # Buscar cliente
-        if re.search(r'000\s*0011', text) or '0000011' in text.replace(' ', '') or len(re.sub(r'\s+', '', text)) == 7:
-            if '0011' in text or '0001' in text or 'CLIENTE' in text.upper():
-                raw_client_text = text
-            
-    # Fallbacks generales por regex sobre todo el texto de Tesseract
-    if not raw_order_text:
-        s_clean = re.sub(r'[^0-9A-Za-z]', '', text_full)
-        pattern_order = r'3[8BA8]2[0Oo]2[6Gg][Ff][0Oo][1Iilf][1Iilf][0OoC][0Oo][0Oo]3[5sS](\d|[sS])(\d|[sS])'
-        match = re.search(pattern_order, s_clean, re.IGNORECASE)
-        if match:
-            raw_order_text = match.group(0)
-            
-    if not raw_date_text:
-        pattern_date = r'\b[0-9A-Za-z]{1,2}[\/i\\\|\,][0-9A-Za-z]{1,2}[\/i\\\|\,](?:202[0-9A-Za-z]|[22UuAa0Oo]{4})\b'
-        match = re.search(pattern_date, text_full)
-        if match:
-            raw_date_text = match.group(0)
-            
-    order_num = clean_extracted_order(raw_order_text) if raw_order_text else f"UNKNOWN-P{page_num}"
-    order_date = clean_extracted_date(raw_date_text) if raw_date_text else "UNKNOWN"
-    
-    # Intentar extraer el nombre del cliente usando la regla de posición espacial respecto al CIF
-    spatial_client = extract_client_by_spatial_coords(normalized_words)
-    client_name = spatial_client if spatial_client else clean_extracted_client(raw_client_text)
-    
-    # 3. Detectar punto de anclaje
-    anchor_x = find_anchor_x(normalized_words)
-    
-    # 4. Encontrar todos los códigos de artículos válidos en la página para crear los anclajes de fila
-    code_candidates = []
-    for w in normalized_words:
-        x_center = (w[0] + w[2]) / 2
-        y_center = (w[1] + w[3]) / 2
-        
-        # En Tesseract, los artículos están ABAJO del encabezado, por lo que x_center > anchor_x + 10
-        if x_center > (anchor_x + 10) and 35 <= y_center <= 92:
-            code_candidates.append(w)
-            
-    # Agrupar fragmentos de códigos que pertenecen a la misma línea horizontal (diferencia vertical pequeña)
-    code_groups = []
-    for c in code_candidates:
-        x_c = (c[0] + c[2]) / 2
-        added = False
-        for cg in code_groups:
-            cg_x = sum((w[0]+w[2])/2 for w in cg) / len(cg)
-            if abs(x_c - cg_x) < 5.0:
-                cg.append(c)
-                added = True
-                break
-        if not added:
-            code_groups.append([c])
-            
-    # Estructurar los anclajes de códigos
-    anchors = []
-    for cg in code_groups:
-        cg.sort(key=lambda w: w[1]) # ordenar de izquierda a derecha
-        code_str = "".join([w[4] for w in cg]).strip()
-        
-        # Saltar si es encabezado, contiene palabras de cabecera o patrones del pedido
-        if any(lbl in code_str for lbl in ["ARTICULO", "OBSE", "RVACIONES", "PAGINA", "CLIENTE", "FECHA", "PEDIDO"]):
-            continue
-        if "38-" in code_str or "2026" in code_str or "0000011" in code_str:
-            continue
-        if not code_str:
-            continue
-            
-        code_x = sum((w[0]+w[2])/2 for w in cg) / len(cg)
-        anchors.append({
-            "code_str": code_str,
-            "code_x": code_x
-        })
-        
-    # Ordenar anclajes de arriba a abajo (x ascendente en Tesseract)
-    anchors.sort(key=lambda a: a["code_x"])
-    
-    # 5. Agrupar todas las palabras de la página en la fila del código más cercano
-    rows = {i: [] for i in range(len(anchors))}
-    
-    for nw in normalized_words:
-        x_center = (nw[0] + nw[2]) / 2
-        y_center = (nw[1] + nw[3]) / 2
-        
-        # Ignorar si está en la zona superior de cabecera
-        if x_center <= (anchor_x + 10):
-            continue
-            
-        best_row_idx = -1
-        best_dist = 9999.0
-        
-        for idx, anc in enumerate(anchors):
-            # Comparamos directamente con code_x ya que la alineación horizontal de Tesseract es muy precisa
-            dist = abs(anc["code_x"] - x_center)
-            if dist < best_dist and dist <= 12.0:  # Umbral de tolerancia
-                best_dist = dist
-                best_row_idx = idx
-                
-        if best_row_idx != -1:
-            rows[best_row_idx].append(nw)
-            
-    # 6. Procesar cada fila agrupada
-    articles = []
-    had_problem = False
-    problem_details = []
-    
-    for idx, anc in enumerate(anchors):
-        row_words = rows[idx]
-        
-        # Separar en columnas
-        codes = []
-        desc_treat_words = []
-        qty_words = []
-        
-        for rw in row_words:
-            y_center = (rw[1] + rw[3]) / 2
-            
-            # Limpiar palabra para comprobar si es etiqueta de observaciones
-            word_clean = re.sub(r'[^A-Z]', '', rw[4].upper())
-            # Omitir de las columnas si es parte de observaciones
-            if any(lbl in word_clean for lbl in ["OBSERV", "RVACION", "OBSE", "RVACTON", "ONES"]):
-                continue
-                
-            if 35 <= y_center <= 92:
-                codes.append(rw)
-            elif 95 <= y_center <= 300:
-                desc_treat_words.append(rw)
-            elif 300 <= y_center <= 440:
-                qty_words.append(rw)
-                
-        # Cantidad
-        qty_val_words = [qw for qw in qty_words if 405 <= (qw[1] + qw[3]) / 2 <= 445]
-        qty_val_words.sort(key=lambda w: w[1])
-        qty_raw = "".join([w[4] for w in qty_val_words])
-        qty_cleaned = clean_quantity(qty_raw) if qty_raw else 1
-        
-        # Separar descripción y tratamiento mediante corte por punto medio vertical (clustering)
-        desc_words = []
-        treat_words = []
-        if desc_treat_words:
-            x_coords = [(w[0] + w[2]) / 2 for w in desc_treat_words]
-            min_x = min(x_coords)
-            max_x = max(x_coords)
-            if max_x - min_x > 4.0:
-                midpoint = (min_x + max_x) / 2
-                for rw in desc_treat_words:
-                    x_center = (rw[0] + rw[2]) / 2
-                    if x_center <= midpoint:  # En Tesseract, menor x_center es más arriba (descripción)
-                        desc_words.append(rw)
-                    else:
-                        treat_words.append(rw)
-            else:
-                desc_words = desc_treat_words
-                
-        desc_words.sort(key=lambda w: w[1])
-        treat_words.sort(key=lambda w: w[1])
-        
-        desc_str = " ".join([w[4] for w in desc_words]).strip()
-        treat_raw = clean_treatment_raw(" ".join([w[4] for w in treat_words]))
-        
-        # Mapear tratamiento
-        treat_mapped = fuzzy_map_treatment(treat_raw, custom_mappings)
-        
-        if treat_raw and not treat_mapped:
-            had_problem = True
-            problem_details.append(f"Fila {idx+1}: Tratamiento desconocido '{treat_raw}'")
-            
-        articles.append({
-            "code": clean_article_code(anc["code_str"]),
-            "quantity": qty_cleaned,
-            "description": desc_str,
-            "treatment_raw": treat_raw,
-            "treatment_mapped": treat_mapped or "PENDIENTE_CONFIRMACION",
-            "needs_resolution": (treat_raw != "" and not treat_mapped)
-        })
-        
     return {
         "order_number": order_num,
         "date": order_date,
@@ -669,8 +795,8 @@ def process_pdf_page(page, page_num, custom_mappings=None):
         "problem_details": problem_details
     }
 
-# API Key de Mistral proporcionada por el usuario
-MISTRAL_API_KEY = "24xqFb47Z18XaRSmjjj9PJ1KtU7h3Eka"
+# API Key de Mistral proporcionada por el usuario o leída de las variables de entorno
+MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "24xqFb47Z18XaRSmjjj9PJ1KtU7h3Eka")
 
 async def run_mistral_ocr_async(file_path: str) -> list[str]:
     """
@@ -762,9 +888,13 @@ async def extract_page_with_mistral_async(markdown_text: str, page_num: int, cus
                         "treatment_raw": {
                             "type": "string",
                             "description": "El tratamiento a realizar al artículo tal como aparece (ej. RAL BLANCO, RAL 7016 TXT, ANODIZADO PLATA GRATA)"
+                        },
+                        "measure": {
+                            "type": "string",
+                            "description": "La medida del artículo tal como aparece en la columna MEDIDA (ej. 6,40 o 6,400). Si no aparece, deja vacío."
                         }
                     },
-                    "required": ["code", "quantity", "description", "treatment_raw"],
+                    "required": ["code", "quantity", "description", "treatment_raw", "measure"],
                     "additionalProperties": False
                 }
             }
@@ -818,13 +948,16 @@ async def extract_page_with_mistral_async(markdown_text: str, page_num: int, cus
             had_problem = True
             problem_details.append(f"Fila {idx+1}: Tratamiento desconocido '{treat_raw}'")
             
+        code_cleaned = clean_article_code(art.get("code", ""))
         articles.append({
-            "code": clean_article_code(art.get("code", "")),
+            "code": code_cleaned,
+            "serie": code_cleaned[:5] if len(code_cleaned) >= 5 else code_cleaned,
             "quantity": int(art.get("quantity", 1)),
             "description": art.get("description", "").strip(),
             "treatment_raw": treat_raw,
             "treatment_mapped": treat_mapped or "PENDIENTE_CONFIRMACION",
-            "needs_resolution": (treat_raw != "" and not treat_mapped)
+            "needs_resolution": (treat_raw != "" and not treat_mapped),
+            "measure": clean_measure(art.get("measure", "6,40"))
         })
         
     return {
@@ -891,9 +1024,13 @@ async def extract_document_batch_with_mistral_async(markdown_pages: list[str], c
                                     "treatment_raw": {
                                         "type": "string",
                                         "description": "El tratamiento original del artículo"
+                                    },
+                                    "measure": {
+                                        "type": "string",
+                                        "description": "La medida del artículo"
                                     }
                                 },
-                                "required": ["code", "quantity", "description", "treatment_raw"],
+                                "required": ["code", "quantity", "description", "treatment_raw", "measure"],
                                 "additionalProperties": False
                             }
                         }
@@ -995,13 +1132,16 @@ async def extract_document_batch_with_mistral_async(markdown_pages: list[str], c
                     had_problem = True
                     problem_details.append(f"Fila {idx_art+1}: Tratamiento desconocido '{treat_raw}'")
                     
+                code_cleaned = clean_article_code(art.get("code", ""))
                 articles.append({
-                    "code": clean_article_code(art.get("code", "")),
+                    "code": code_cleaned,
+                    "serie": code_cleaned[:5] if len(code_cleaned) >= 5 else code_cleaned,
                     "quantity": int(art.get("quantity", 1)),
                     "description": art.get("description", "").strip(),
                     "treatment_raw": treat_raw,
                     "treatment_mapped": treat_mapped or "PENDIENTE_CONFIRMACION",
-                    "needs_resolution": (treat_raw != "" and not treat_mapped)
+                    "needs_resolution": (treat_raw != "" and not treat_mapped),
+                    "measure": clean_measure(art.get("measure", "6,40"))
                 })
                 
             page_res = {

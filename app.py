@@ -59,7 +59,9 @@ db_state = {
         "DESDESG",
         "Cliente",
         "Nmero Pedido Cliente",
-        "Tratamiento"
+        "Tratamiento",
+        "Serie",
+        "Medida"
     ]
 }
 
@@ -110,6 +112,55 @@ async def broadcast_status(data: Dict[str, Any]):
     if active_connections:
         await asyncio.gather(*(send_safe(conn) for conn in active_connections), return_exceptions=True)
 
+async def run_local_extraction(doc, total, start_time):
+    """Ejecuta la extracción local rápida (Fitz digital nativo o Tesseract OCR de fallback)."""
+    global db_state
+    db_state["processed_pages"] = 0
+    db_state["orders"] = {}
+    save_db()
+    
+    for idx in range(total):
+        page = doc[idx]
+        page_num = idx + 1
+        
+        try:
+            # Ejecutar process_pdf_page en un hilo separado
+            res = await asyncio.to_thread(process_pdf_page, page, page_num, db_state["custom_mappings"])
+            db_state["orders"][str(page_num)] = res
+        except Exception as page_err:
+            print(f"Error procesando pág {page_num}: {page_err}")
+            db_state["orders"][str(page_num)] = {
+                "order_number": f"ERROR-P{page_num}",
+                "date": "UNKNOWN",
+                "client": "ERROR",
+                "articles": [],
+                "had_problem": True,
+                "problem_details": [f"Error de procesamiento: {str(page_err)}"]
+            }
+            
+        db_state["processed_pages"] = page_num
+        elapsed = time.time() - start_time
+        db_state["elapsed_time"] = elapsed
+        
+        avg_time = elapsed / page_num if page_num > 0 else 1.0
+        remaining_pages = total - page_num
+        db_state["expected_time_remaining"] = avg_time * remaining_pages
+        
+        save_db()
+        
+        # Enviar estado actual
+        res_current = db_state["orders"].get(str(page_num), {})
+        had_prob = res_current.get("had_problem", False)
+        await broadcast_status({
+            "type": "progress",
+            "processed_pages": page_num,
+            "total_pages": total,
+            "expected_time_remaining": round(db_state["expected_time_remaining"], 1),
+            "had_problem": had_prob
+        })
+        
+        await asyncio.sleep(0.01)
+
 async def process_pdf_background(file_path: str):
     """Tarea en segundo plano que procesa el archivo PDF página por página."""
     global db_state
@@ -125,95 +176,78 @@ async def process_pdf_background(file_path: str):
         
         start_time = time.time()
         
-        try:
-            # 1. Notificar al WebSocket que estamos subiendo a Mistral
-            await broadcast_status({
-                "type": "progress",
-                "processed_pages": 0,
-                "total_pages": total,
-                "expected_time_remaining": 30.0,
-                "had_problem": False,
-                "status_text": "Subiendo y analizando documento con Mistral OCR..."
-            })
-            
-            # 2. Ejecutar Mistral OCR sobre el PDF completo
-            markdown_pages = await run_mistral_ocr_async(file_path)
-            
-            # Si el OCR no devolvió las páginas esperadas, lanzar error
-            if len(markdown_pages) < total:
-                raise Exception(f"Mistral OCR devolvió {len(markdown_pages)} páginas, pero el PDF tiene {total}")
+        # Comprobar si el PDF tiene texto digital seleccionable en la primera página
+        has_digital_text = False
+        if total > 0:
+            try:
+                first_page_words = doc[0].get_text("words")
+                if first_page_words and len(first_page_words) >= 20:
+                    has_digital_text = True
+            except Exception as e:
+                print(f"Error al analizar texto digital en primera página: {e}")
                 
-            # 3. Procesar las páginas secuencialmente en lotes de 10 para evitar Rate Limit 429
-            async def progress_callback(page_num, res):
-                # Guardar el resultado de la página procesada en tiempo real
-                db_state["orders"][str(page_num)] = res
-                db_state["processed_pages"] = len(db_state["orders"])
-                elapsed = time.time() - start_time
-                db_state["elapsed_time"] = elapsed
+        # Si tiene texto digital seleccionable, procesar localmente a toda velocidad (fitz nativo)
+        # Si no, e intentamos Mistral (si la API key está en el entorno y no la quemada)
+        use_mistral = False
+        if not has_digital_text:
+            env_key = os.environ.get("MISTRAL_API_KEY")
+            if env_key and env_key.strip():
+                use_mistral = True
                 
-                avg_time = elapsed / db_state["processed_pages"] if db_state["processed_pages"] > 0 else 1.0
-                remaining = total - db_state["processed_pages"]
-                db_state["expected_time_remaining"] = avg_time * remaining
-                
-                # Persistir el progreso parcial
-                save_db()
-                
-                # Notificar progreso vía WebSocket
+        if use_mistral:
+            try:
+                # 1. Notificar al WebSocket que estamos subiendo a Mistral
                 await broadcast_status({
                     "type": "progress",
-                    "processed_pages": db_state["processed_pages"],
+                    "processed_pages": 0,
                     "total_pages": total,
-                    "expected_time_remaining": round(db_state["expected_time_remaining"], 1),
-                    "had_problem": res["had_problem"]
+                    "expected_time_remaining": 30.0,
+                    "had_problem": False,
+                    "status_text": "Subiendo y analizando documento con Mistral OCR..."
                 })
                 
-            orders_extracted = await extract_document_batch_with_mistral_async(
-                markdown_pages, 
-                db_state["custom_mappings"], 
-                status_callback=progress_callback
-            )
-            db_state["orders"].update(orders_extracted)
-            save_db()
-            
-        except Exception as mistral_err:
-            print(f"Error procesando con Mistral (se inicia fallback a Tesseract local): {mistral_err}")
-            # Resetear estado y contador
-            db_state["processed_pages"] = 0
-            db_state["orders"] = {}
-            save_db()
-            
-            # Fallback a Tesseract local (ejecutado de forma asíncrona para no bloquear el loop)
-            start_time = time.time()
-            for idx in range(total):
-                page = doc[idx]
-                page_num = idx + 1
+                # 2. Ejecutar Mistral OCR sobre el PDF completo
+                markdown_pages = await run_mistral_ocr_async(file_path)
                 
-                # Ejecutar process_pdf_page en un hilo separado para evitar bloquear el bucle de eventos de FastAPI.
-                # De este modo, la API (ej: /api/status) y los WebSockets siguen respondiendo durante el OCR local.
-                res = await asyncio.to_thread(process_pdf_page, page, page_num, db_state["custom_mappings"])
-                db_state["orders"][str(page_num)] = res
-                
-                db_state["processed_pages"] = page_num
-                elapsed = time.time() - start_time
-                db_state["elapsed_time"] = elapsed
-                
-                avg_time = elapsed / page_num
-                remaining_pages = total - page_num
-                db_state["expected_time_remaining"] = avg_time * remaining_pages
-                
+                if len(markdown_pages) < total:
+                    raise Exception(f"Mistral OCR devolvió {len(markdown_pages)} páginas, pero el PDF tiene {total}")
+                    
+                # 3. Procesar las páginas en lotes
+                async def progress_callback(page_num, res):
+                    db_state["orders"][str(page_num)] = res
+                    db_state["processed_pages"] = len(db_state["orders"])
+                    elapsed = time.time() - start_time
+                    db_state["elapsed_time"] = elapsed
+                    
+                    avg_time = elapsed / db_state["processed_pages"] if db_state["processed_pages"] > 0 else 1.0
+                    remaining = total - db_state["processed_pages"]
+                    db_state["expected_time_remaining"] = avg_time * remaining
+                    
+                    save_db()
+                    
+                    await broadcast_status({
+                        "type": "progress",
+                        "processed_pages": db_state["processed_pages"],
+                        "total_pages": total,
+                        "expected_time_remaining": round(db_state["expected_time_remaining"], 1),
+                        "had_problem": res["had_problem"]
+                    })
+                    
+                orders_extracted = await extract_document_batch_with_mistral_async(
+                    markdown_pages, 
+                    db_state["custom_mappings"], 
+                    status_callback=progress_callback
+                )
+                db_state["orders"].update(orders_extracted)
                 save_db()
                 
-                await broadcast_status({
-                    "type": "progress",
-                    "processed_pages": page_num,
-                    "total_pages": total,
-                    "expected_time_remaining": round(db_state["expected_time_remaining"], 1),
-                    "had_problem": res["had_problem"]
-                })
-                
-                # Pausa mínima
-                await asyncio.sleep(0.02)
-                
+            except Exception as mistral_err:
+                print(f"Error procesando con Mistral (se inicia fallback local): {mistral_err}")
+                await run_local_extraction(doc, total, start_time)
+        else:
+            # Procesar localmente (Fitz nativo / Tesseract local)
+            await run_local_extraction(doc, total, start_time)
+            
     except Exception as e:
         print(f"Error en procesamiento de PDF: {e}")
     finally:
@@ -427,6 +461,10 @@ async def export_data(format: str = "xlsx"):
                         row_data.append(order_num)
                     elif col == "Tratamiento":
                         row_data.append(art.get("treatment_mapped"))
+                    elif col == "Serie":
+                        row_data.append(art.get("serie", ""))
+                    elif col == "Medida":
+                        row_data.append(art.get("measure", ""))
                     else:
                         row_data.append("")
                 writer.writerow(row_data)
@@ -470,6 +508,10 @@ async def export_data(format: str = "xlsx"):
                         row_data.append(order_num)
                     elif col == "Tratamiento":
                         row_data.append(art.get("treatment_mapped"))
+                    elif col == "Serie":
+                        row_data.append(art.get("serie", ""))
+                    elif col == "Medida":
+                        row_data.append(art.get("measure", ""))
                     else:
                         row_data.append("")
                 ws.append(row_data)
