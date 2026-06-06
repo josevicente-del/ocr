@@ -53,12 +53,27 @@
                     </div>
                     <!-- Estado del procesamiento -->
                     <div id="processing-status" class="processing-status hidden">
-                        <div class="progress-bar-container">
-                            <div id="progress-bar" class="progress-bar"></div>
+                        <!-- Carga del PDF -->
+                        <div class="progress-section">
+                            <span class="progress-section-title"><i class="fa-solid fa-file-arrow-up"></i> Carga del PDF</span>
+                            <div class="progress-bar-container">
+                                <div id="upload-progress-bar" class="progress-bar upload-bar"></div>
+                            </div>
+                            <div class="progress-info">
+                                <span id="upload-progress-text">Esperando subida...</span>
+                            </div>
                         </div>
-                        <div class="progress-info">
-                            <span id="progress-text">Procesando página 0 de 0...</span>
-                            <span id="time-remaining">Tiempo restante estimado: calculando...</span>
+                        
+                        <!-- Conversión y Procesamiento -->
+                        <div class="progress-section" style="margin-top: 12px;">
+                            <span class="progress-section-title"><i class="fa-solid fa-gears"></i> Conversión y Procesamiento</span>
+                            <div class="progress-bar-container">
+                                <div id="conversion-progress-bar" class="progress-bar conversion-bar"></div>
+                            </div>
+                            <div class="progress-info">
+                                <span id="conversion-progress-text">Esperando conversión...</span>
+                                <span id="time-remaining">Tiempo restante estimado: calculando...</span>
+                            </div>
                         </div>
                     </div>
                 </div>

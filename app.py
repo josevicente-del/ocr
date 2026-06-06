@@ -148,7 +148,7 @@ async def run_local_extraction(doc, total, start_time):
         
         save_db()
         
-        # Enviar estado actual
+        # Enviar estado actual incluyendo datos de la página recién procesada para actualizar la UI en tiempo real
         res_current = db_state["orders"].get(str(page_num), {})
         had_prob = res_current.get("had_problem", False)
         await broadcast_status({
@@ -156,7 +156,9 @@ async def run_local_extraction(doc, total, start_time):
             "processed_pages": page_num,
             "total_pages": total,
             "expected_time_remaining": round(db_state["expected_time_remaining"], 1),
-            "had_problem": had_prob
+            "had_problem": had_prob,
+            "page_num": page_num,
+            "page_data": res_current
         })
         
         await asyncio.sleep(0.01)
@@ -225,12 +227,15 @@ async def process_pdf_background(file_path: str):
                     
                     save_db()
                     
+                    # Enviar estado actual incluyendo datos de la página recién procesada para actualizar la UI en tiempo real
                     await broadcast_status({
                         "type": "progress",
                         "processed_pages": db_state["processed_pages"],
                         "total_pages": total,
                         "expected_time_remaining": round(db_state["expected_time_remaining"], 1),
-                        "had_problem": res["had_problem"]
+                        "had_problem": res["had_problem"],
+                        "page_num": page_num,
+                        "page_data": res
                     })
                     
                 orders_extracted = await extract_document_batch_with_mistral_async(

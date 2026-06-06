@@ -8,8 +8,12 @@
 const dropZone = document.getElementById("drop-zone");
 const fileInput = document.getElementById("file-input");
 const processingStatus = document.getElementById("processing-status");
-const progressBar = document.getElementById("progress-bar");
-const progressText = document.getElementById("progress-text");
+
+// Nuevas barras de progreso duales
+const uploadProgressBar = document.getElementById("upload-progress-bar");
+const uploadProgressText = document.getElementById("upload-progress-text");
+const conversionProgressBar = document.getElementById("conversion-progress-bar");
+const conversionProgressText = document.getElementById("conversion-progress-text");
 const timeRemaining = document.getElementById("time-remaining");
 
 const metricPages = document.getElementById("metric-pages");
@@ -29,6 +33,7 @@ const loaderOverlay = document.getElementById("loader-overlay");
 // Estado Local
 let currentColumns = [];
 let socket = null;
+let ordersData = {}; // Guarda los pedidos consolidados para actualizar incrementalmente la UI
 
 // Lista de tratamientos estándar ERP para el selector
 const STANDARD_ERP_TREATMENTS = [
@@ -54,26 +59,35 @@ function connectWebSocket() {
             if (data.is_processing || data.type === "progress") {
                 processingStatus.classList.remove("hidden");
                 const percent = data.total_pages > 0 ? (data.processed_pages / data.total_pages) * 100 : 0;
-                progressBar.style.width = `${percent}%`;
-                progressText.innerText = `Procesando página ${data.processed_pages} de ${data.total_pages}...`;
+                
+                conversionProgressBar.style.width = `${percent}%`;
+                conversionProgressText.innerText = `Procesando página ${data.processed_pages} de ${data.total_pages}...`;
                 
                 if (data.expected_time_remaining > 0) {
                     timeRemaining.innerText = `Tiempo restante estimado: ${data.expected_time_remaining}s`;
                 } else {
                     timeRemaining.innerText = "Tiempo restante estimado: calculando...";
                 }
+
+                // Actualizar incrementalmente la interfaz si vienen datos de página individuales
+                if (data.page_num && data.page_data) {
+                    ordersData[data.page_num] = data.page_data;
+                    updateUIFromOrders(ordersData);
+                }
             } else {
                 processingStatus.classList.add("hidden");
             }
         } else if (data.type === "completed") {
-            progressBar.style.width = "100%";
-            progressText.innerText = "¡Procesamiento completo!";
+            conversionProgressBar.style.width = "100%";
+            conversionProgressText.innerText = "¡Procesamiento completo!";
             timeRemaining.innerText = "";
             setTimeout(() => {
                 processingStatus.classList.add("hidden");
                 refreshStatus();
             }, 1500);
         } else if (data.type === "reset") {
+            ordersData = {};
+            updateUIFromOrders(ordersData);
             refreshStatus();
         }
     };
@@ -86,31 +100,60 @@ function connectWebSocket() {
 
 // --- Peticiones API REST ---
 
+// --- Actualización Reactiva de la Interfaz ---
+function updateUIFromOrders(orders) {
+    const orderNumbers = new Set();
+    let totalArticles = 0;
+    const unresolvedItems = [];
+    
+    Object.entries(orders).forEach(([pageNum, data]) => {
+        if (data.order_number && !data.order_number.startsWith("UNKNOWN")) {
+            orderNumbers.add(data.order_number);
+        }
+        (data.articles || []).forEach(art => {
+            totalArticles++;
+            if (art.needs_resolution) {
+                unresolvedItems.push({
+                    page_num: parseInt(pageNum),
+                    order_number: data.order_number,
+                    code: art.code,
+                    description: art.description,
+                    treatment_raw: art.treatment_raw
+                });
+            }
+        });
+    });
+    
+    // Actualizar Métricas en tiempo real
+    metricPages.innerText = Object.keys(orders).length;
+    metricOrders.innerText = orderNumbers.size;
+    metricArticles.innerText = totalArticles;
+    metricUnresolved.innerText = unresolvedItems.length;
+    
+    // Habilitar/Deshabilitar botones de exportación
+    btnExportExcel.disabled = (totalArticles === 0);
+    btnExportCsv.disabled = (totalArticles === 0);
+    
+    // Renderizar Resolutor de Tratamientos
+    renderResolver(unresolvedItems);
+    
+    // Renderizar Tabla Principal de Pedidos
+    renderTable(orders);
+}
+
 async function refreshStatus() {
     loaderOverlay.classList.remove("hidden");
     try {
         const res = await fetch("/api/status");
         const status = await res.json();
         
-        // Actualizar Métricas
-        metricPages.innerText = status.total_pages;
-        metricOrders.innerText = status.orders_count;
-        metricArticles.innerText = status.articles_count;
-        metricUnresolved.innerText = status.unresolved_count;
-        
-        // Habilitar/Deshabilitar botones de exportación
-        btnExportExcel.disabled = (status.articles_count === 0);
-        btnExportCsv.disabled = (status.articles_count === 0);
-        
         // Renderizar Columnas
         currentColumns = status.column_order;
         renderColumns();
         
-        // Renderizar Resolutor de Tratamientos
-        renderResolver(status.unresolved_items);
-        
-        // Renderizar Tabla Principal de Pedidos
-        renderTable(status.orders_data);
+        // Asignar estado local e iniciar actualización de UI
+        ordersData = status.orders_data;
+        updateUIFromOrders(ordersData);
         
     } catch (e) {
         console.error("Error al obtener estado:", e);
@@ -406,7 +449,7 @@ dropZone.addEventListener("drop", (e) => {
     }
 });
 
-async function uploadFile(file) {
+function uploadFile(file) {
     if (!file.name.endsWith(".pdf")) {
         alert("Por favor, sube un archivo PDF válido.");
         return;
@@ -415,32 +458,55 @@ async function uploadFile(file) {
     const formData = new FormData();
     formData.append("file", file);
     
-    loaderOverlay.classList.remove("hidden");
+    // Mostrar paneles e inicializar barras
     processingStatus.classList.remove("hidden");
-    progressBar.style.width = "0%";
-    progressText.innerText = "Cargando archivo y preparando extracción...";
+    
+    uploadProgressBar.style.width = "0%";
+    uploadProgressText.innerText = "Preparando subida del archivo...";
+    
+    conversionProgressBar.style.width = "0%";
+    conversionProgressText.innerText = "Esperando que finalice la carga del archivo...";
     timeRemaining.innerText = "Tiempo restante estimado: calculando...";
     
-    try {
-        const res = await fetch("/api/upload", {
-            method: "POST",
-            body: formData
-        });
-        
-        if (res.ok) {
+    const xhr = new XMLHttpRequest();
+    
+    // Escuchar el progreso de subida (upload progress) en tiempo real
+    xhr.upload.onprogress = function(event) {
+        if (event.lengthComputable) {
+            const percent = Math.round((event.loaded / event.total) * 100);
+            uploadProgressBar.style.width = `${percent}%`;
+            
+            const loadedMB = (event.loaded / (1024 * 1024)).toFixed(1);
+            const totalMB = (event.total / (1024 * 1024)).toFixed(1);
+            uploadProgressText.innerText = `Subiendo archivo: ${percent}% (${loadedMB} MB de ${totalMB} MB)...`;
+        }
+    };
+    
+    // Escuchar la respuesta final de la petición
+    xhr.onload = function() {
+        if (xhr.status >= 200 && xhr.status < 300) {
+            uploadProgressBar.style.width = "100%";
+            uploadProgressText.innerText = "¡PDF cargado correctamente! Iniciando conversión...";
             console.log("Archivo cargado con éxito, procesamiento iniciado.");
         } else {
-            const err = await res.json();
-            alert(`Error: ${err.message}`);
+            let errorMsg = "Ocurrió un error en el servidor.";
+            try {
+                const err = JSON.parse(xhr.responseText);
+                errorMsg = err.message || errorMsg;
+            } catch (e) {}
+            alert(`Error: ${errorMsg}`);
             processingStatus.classList.add("hidden");
         }
-    } catch (e) {
-        console.error("Error al subir archivo:", e);
-        alert("Ocurrió un error al subir el archivo.");
+    };
+    
+    // Escuchar errores de red/subida
+    xhr.onerror = function() {
+        alert("Ocurrió un error de red al subir el archivo.");
         processingStatus.classList.add("hidden");
-    } finally {
-        loaderOverlay.classList.add("hidden");
-    }
+    };
+    
+    xhr.open("POST", "/api/upload");
+    xhr.send(formData);
 }
 
 // Botones de acción

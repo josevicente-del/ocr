@@ -290,29 +290,76 @@ body {
     color: var(--color-text-muted);
 }
 
-/* Barra de progreso */
+/* Sección de Barras de Progreso Duales */
 .processing-status {
     margin-top: 20px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 16px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--border-color);
+    padding: 16px;
+    border-radius: var(--border-radius-md);
+}
+
+.progress-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.progress-section-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-text-main);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    letter-spacing: 0.3px;
+}
+
+.progress-section-title i {
+    font-size: 0.95rem;
+    transition: var(--transition-smooth);
+}
+
+.progress-section:first-child .progress-section-title i {
+    color: var(--color-secondary); /* Icono cian para subida */
+    text-shadow: 0 0 8px var(--color-secondary-glow);
+}
+
+.progress-section:last-child .progress-section-title i {
+    color: var(--color-primary); /* Icono violeta para conversión */
+    text-shadow: 0 0 8px var(--color-primary-glow);
 }
 
 .progress-bar-container {
     width: 100%;
     height: 8px;
-    background: rgba(255, 255, 255, 0.05);
+    background: rgba(255, 255, 255, 0.04);
     border-radius: 4px;
     overflow: hidden;
+    position: relative;
+    border: 1px solid rgba(255, 255, 255, 0.02);
 }
 
 .progress-bar {
     width: 0%;
     height: 100%;
-    background: linear-gradient(90deg, var(--color-primary), var(--color-secondary));
     border-radius: 4px;
-    transition: width 0.3s ease;
-    box-shadow: 0 0 8px rgba(0, 229, 255, 0.4);
+    transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Barra de Carga (Cian / Azul) */
+.upload-bar {
+    background: linear-gradient(90deg, #00b0ff, var(--color-secondary));
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.6);
+}
+
+/* Barra de Conversión (Violeta / Magenta) */
+.conversion-bar {
+    background: linear-gradient(90deg, var(--color-primary), #d500f9);
+    box-shadow: 0 0 12px rgba(124, 77, 255, 0.6);
 }
 
 .progress-info {
@@ -320,6 +367,13 @@ body {
     justify-content: space-between;
     font-size: 0.75rem;
     color: var(--color-text-muted);
+    line-height: 1.4;
+}
+
+#time-remaining {
+    font-style: italic;
+    color: #ffd54f;
+    text-shadow: 0 0 4px rgba(255, 179, 0, 0.2);
 }
 
 /* Tarjeta de Estadísticas */

@@ -736,12 +736,13 @@ def process_pdf_page_digital(page, page_num, custom_mappings=None):
 def process_pdf_page(page, page_num, custom_mappings=None):
     """
     Procesa una página del PDF y extrae el pedido, la fecha, el cliente y los artículos.
-    Primero intenta la extracción digital rápida nativa y cae a Tesseract si el PDF no contiene texto seleccionable.
+    Forzamos a usar Tesseract OCR local (lectura visual) para evitar que fuentes internas corruptas
+    (ToUnicode map dañado) del PDF causen caracteres basura y códigos de artículos erróneos.
     """
-    # 0. Intentar extracción digital rápida nativa primero
-    res_digital = process_pdf_page_digital(page, page_num, custom_mappings)
-    if res_digital and len(res_digital.get("articles", [])) > 0:
-        return res_digital
+    # Se deshabilita la extracción digital nativa por problemas de codificación ToUnicode del ERP
+    # res_digital = process_pdf_page_digital(page, page_num, custom_mappings)
+    # if res_digital and len(res_digital.get("articles", [])) > 0:
+    #     return res_digital
         
     # 1. Renderizar la página a 150 DPI para Tesseract OCR
     pix = page.get_pixmap(dpi=150)
