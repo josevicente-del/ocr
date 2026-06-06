@@ -12,6 +12,7 @@ import asyncio
 import re
 import io
 import csv
+import gc
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, WebSocket, WebSocketDisconnect, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -161,7 +162,9 @@ async def run_local_extraction(doc, total, start_time):
             "page_data": res_current
         })
         
-        await asyncio.sleep(0.01)
+        # Liberar memoria de forma activa en el backend
+        gc.collect()
+        await asyncio.sleep(0.02)
 
 async def process_pdf_background(file_path: str):
     """Tarea en segundo plano que procesa el archivo PDF página por página."""

@@ -22,6 +22,7 @@ COPY . .
 # Configurar variables de entorno para producción Linux
 ENV TESSERACT_CMD="/usr/bin/tesseract"
 ENV TESSDATA_PREFIX="/usr/share/tesseract-ocr/5/tessdata"
+ENV OMP_THREAD_LIMIT=1
 
 # Exponer el puerto por defecto de la aplicación
 EXPOSE 8000

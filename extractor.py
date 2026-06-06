@@ -12,6 +12,7 @@ import io
 import json
 import httpx
 import asyncio
+import gc
 from PIL import Image
 import pytesseract
 
@@ -744,8 +745,9 @@ def process_pdf_page(page, page_num, custom_mappings=None):
     # if res_digital and len(res_digital.get("articles", [])) > 0:
     #     return res_digital
         
-    # 1. Renderizar la página a 150 DPI para Tesseract OCR
-    pix = page.get_pixmap(dpi=150)
+    # 1. Renderizar la página a 110 DPI para Tesseract OCR (ahorrar memoria RAM en Render)
+    dpi_value = 110
+    pix = page.get_pixmap(dpi=dpi_value)
     img_data = pix.tobytes("png")
     img = Image.open(io.BytesIO(img_data))
     
@@ -755,7 +757,11 @@ def process_pdf_page(page, page_num, custom_mappings=None):
     # Ejecutar Tesseract
     tsv_data = pytesseract.image_to_data(img, lang="spa+eng", config=config)
     
-    # Parsear el TSV y escalar a puntos de PDF a 72 DPI (72/150 = 0.48)
+    # Liberar memoria de la imagen en Python inmediatamente
+    img.close()
+    
+    # Parsear el TSV y escalar a puntos de PDF a 72 DPI (escala dinámica adaptativa)
+    scale = 72.0 / dpi_value
     normalized_words = []
     lines = tsv_data.split('\n')
     header = True
@@ -777,15 +783,18 @@ def process_pdf_page(page, page_num, custom_mappings=None):
             
             # x0, x1 representan la coordenada vertical (top)
             # y0, y1 representan la coordenada horizontal (left)
-            x0 = top * 0.48
-            y0 = left * 0.48
-            x1 = (top + height) * 0.48
-            y1 = (left + width) * 0.48
+            x0 = top * scale
+            y0 = left * scale
+            x1 = (top + height) * scale
+            y1 = (left + width) * scale
             
             normalized_words.append((x0, y0, x1, y1, text))
             
     order_num, order_date, client_name = extract_metadata_from_normalized_words(normalized_words, page_num)
     articles, had_problem, problem_details = extract_articles_from_normalized_words(normalized_words, custom_mappings)
+    
+    # Recolección forzada de basura para evitar fugas de memoria en Render
+    gc.collect()
     
     return {
         "order_number": order_num,
